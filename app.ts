@@ -1,15 +1,5 @@
 import express, { Request, Response } from 'express';
-
-interface Contact {
-    id: number;
-    phoneNumber: string | null;
-    email: string | null;
-    linkedId: number | null;
-    linkPrecedence: "primary" | "secondary";
-    createdAt: Date;
-    updatedAt: Date;
-    deletedAt: Date | null;
-}
+import { PrismaClient } from '@prisma/client';
 
 interface IdentifyRequest {
     email?: string;
@@ -30,9 +20,7 @@ const LINK_PRECEDENCE = {
     SECONDARY: 'secondary' as const
 };
 
-let contacts: Contact[] = [];
-let nextId = 1;
-
+const prisma = new PrismaClient();
 const app = express();
 const port = 3000;
 
@@ -54,22 +42,24 @@ app.post('/identify', async (req: Request<{}, IdentifyResponse, IdentifyRequest>
             });
         }
 
-        const sameContacts = contacts.filter(contact => 
-            (email && contact.email === email) || (phoneNumber && contact.phoneNumber === phoneNumber)
-        );
+        const sameContacts = await prisma.contact.findMany({
+            where: {
+                OR: [
+                    { email: email || undefined },
+                    { phoneNumber: phoneNumber || undefined }
+                ],
+                deletedAt: null
+            }
+        });
 
         if (sameContacts.length === 0) {
-            const newContact: Contact = {
-                id: nextId++,
-                email: email || null,
-                phoneNumber: phoneNumber || null,
-                linkedId: null,
-                linkPrecedence: LINK_PRECEDENCE.PRIMARY,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                deletedAt: null,
-            };
-            contacts.push(newContact);
+            const newContact = await prisma.contact.create({
+                data: {
+                    email: email || null,
+                    phoneNumber: phoneNumber || null,
+                    linkPrecedence: LINK_PRECEDENCE.PRIMARY
+                }
+            });
 
             return res.status(200).json({
                 contact: {
@@ -81,46 +71,60 @@ app.post('/identify', async (req: Request<{}, IdentifyResponse, IdentifyRequest>
             });
         }
 
-        const contactsMap = new Map<number, Contact>();
         const effPrimIds = new Set<number>();
-
         for (const contact of sameContacts) {
-            contactsMap.set(contact.id, contact);
             if (contact.linkPrecedence === LINK_PRECEDENCE.PRIMARY) {
                 effPrimIds.add(contact.id);
             } else if (contact.linkedId) {
                 effPrimIds.add(contact.linkedId);
-                contactsMap.set(contact.linkedId, contacts.find(c => c.id === contact.linkedId)!);
             }
         }
 
-        let allFilteredContacts = Array.from(contactsMap.values());
-        const primContacts = allFilteredContacts.filter(contact => contact.linkPrecedence === LINK_PRECEDENCE.PRIMARY);
-        const chosen = primContacts.reduce((prev, curr) => prev.createdAt <= curr.createdAt ? prev : curr);
+        const allFilteredContacts = await prisma.contact.findMany({
+            where: {
+                OR: [
+                    { id: { in: Array.from(effPrimIds) } },
+                    { linkedId: { in: Array.from(effPrimIds) } }
+                ],
+                deletedAt: null
+            },
+            orderBy: { createdAt: 'asc' }
+        });
 
-        for (const contact of primContacts) {
-            if (contact.id !== chosen.id) {
-                contact.linkPrecedence = LINK_PRECEDENCE.SECONDARY;
-                contact.linkedId = chosen.id;
-                contact.updatedAt = new Date();
-            }
+        const primContacts = allFilteredContacts.filter(contact => 
+            contact.linkPrecedence === LINK_PRECEDENCE.PRIMARY
+        );
+        const chosen = primContacts[0];
+
+        if (primContacts.length > 1) {
+            await prisma.contact.updateMany({
+                where: {
+                    id: { in: primContacts.slice(1).map(c => c.id) }
+                },
+                data: {
+                    linkPrecedence: LINK_PRECEDENCE.SECONDARY,
+                    linkedId: chosen.id,
+                    updatedAt: new Date()
+                }
+            });
         }
 
-        const unionEmails = new Set<string>(allFilteredContacts.map(c => c.email!).filter(Boolean));
-        const unionPhones = new Set<string>(allFilteredContacts.map(c => c.phoneNumber!).filter(Boolean));
+        const unionEmails = new Set<string>(
+            allFilteredContacts.map(c => c.email!).filter(Boolean)
+        );
+        const unionPhones = new Set<string>(
+            allFilteredContacts.map(c => c.phoneNumber!).filter(Boolean)
+        );
 
         if ((email && !unionEmails.has(email)) || (phoneNumber && !unionPhones.has(phoneNumber))) {
-            const newContact: Contact = {
-                id: nextId++,
-                email: email || null,
-                phoneNumber: phoneNumber || null,
-                linkedId: chosen.id,
-                linkPrecedence: LINK_PRECEDENCE.SECONDARY,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                deletedAt: null,
-            };
-            contacts.push(newContact);
+            const newContact = await prisma.contact.create({
+                data: {
+                    email: email || null,
+                    phoneNumber: phoneNumber || null,
+                    linkedId: chosen.id,
+                    linkPrecedence: LINK_PRECEDENCE.SECONDARY
+                }
+            });
             allFilteredContacts.push(newContact);
         }
 

@@ -58,10 +58,68 @@ app.post('/identify', async (req: Request, res: Response) => {
             })
         }
 
-        return res.status(200).json({ messgae: 'Contact info already exists',   //For test debugging
-            sameContacts
-         })
-         
+        const effPrimIds = new Set<number>();
+
+        for (const contact of sameContacts) {
+            if (contact.linkPrecedence === "primary") {
+                effPrimIds.add(contact.id);
+            } else if (contact.linkedId) {
+                effPrimIds.add(contact.linkedId);
+            }
+        }
+
+        let allFilteredContacts = contacts.filter(contact => 
+            effPrimIds.has(contact.id) || (contact.linkedId !== null && effPrimIds.has(contact.linkedId))
+        );
+
+        const primContacts = allFilteredContacts.filter(contact => contact.linkPrecedence === "primary");
+        const chosen = primContacts.reduce((prev, curr) => prev.createdAt <= curr.createdAt ? prev : curr);
+
+        for (const contact of primContacts) {
+            if (contact.id !== chosen.id) {
+                contact.linkPrecedence = "secondary";
+                contact.linkedId = chosen.id;
+                contact.updatedAt = new Date();
+            }
+        }
+
+        const emails = new Set<string>();
+        const phones = new Set<string>();
+
+        for (const contact of allFilteredContacts) {
+            if (contact.email){
+                emails.add(contact.email);
+            }
+            if (contact.phoneNumber) {
+                phones.add(contact.phoneNumber);
+            }
+        }
+
+        let emailsArr = Array.from(emails);
+        let phoneArr = Array.from(phones);
+
+        if (chosen.email) {
+            emailsArr = [chosen.email, ...emailsArr.filter(e => e !== chosen.email)];
+        }
+        if (chosen.phoneNumber) {
+            phoneArr = [chosen.phoneNumber, ...phoneArr.filter(p => p !== chosen.phoneNumber)]
+        }
+
+        const secondaryIds = allFilteredContacts
+            .filter(contact => contact.linkPrecedence === "secondary")
+            .map(contact => contact.id)
+            .sort((a, b) => a - b);
+
+
+        return res.status(200).json({
+            contact: {
+                primaryContatctId: chosen.id,
+                emails: emailsArr,
+                phoneNumbers: phoneArr,
+                secondaryContactIds: secondaryIds,
+            }
+        });
+
     } catch(err) {
         console.error("An error occured:", err);
         return res.status(500).json({ message: 'Internal server error' });
